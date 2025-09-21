@@ -1,26 +1,25 @@
 {
   "access_token": "ISI_TOKEN_WOLFBET_DI_SINI",
 
-  "currency": "btc",
+  "currency": "trx",
 
   "base_bet": 0.00000001,
   "multiplier": 2.0,
-  "max_bet": 0.0001,
   "chance": 49.5,
   "rule_mode": "auto",
 
   "take_profit": 0.0005,
-  "stop_loss": -0.0005,
-  "cooldown_sec": 1.0,
+  "stop_loss": -0.05,
+  "cooldown_sec": 0,
 
   "debug": true,
   "auto_start": true,
   "auto_start_delay": 5,
 
-  "strategy": "martingale",                  
-  "auto_strategy_change": true,              
-  "strategy_switch_mode": "on_loss_streak",  
-  "loss_streak_trigger": 5,                  
+  "strategy": "martingale",
+  "auto_strategy_change": true,
+  "strategy_switch_mode": "on_loss_streak",
+  "loss_streak_trigger": 5,
 
   "strategy_cycle": [
     "martingale",
@@ -32,12 +31,12 @@
     "randomized"
   ],
 
-  "jackpot_chance": 1.0,                    
-  "jackpot_raise_min_pct": 1.02,            
-  "jackpot_raise_max_pct": 1.05,            
+  "jackpot_chance": 1.0,
+  "jackpot_raise_min_pct": 1.02,
+  "jackpot_raise_max_pct": 1.05,
 
-  "high_risk_chance": 5.0,                  
-  "high_risk_raise_min_pct": 1.10,          
-  "high_risk_raise_max_pct": 1.20,          
-  "high_risk_interval": 20                  
+  "high_risk_chance": 5.0,
+  "high_risk_raise_min_pct": 1.05,
+  "high_risk_raise_max_pct": 1.10,
+  "high_risk_interval": 20
 }
