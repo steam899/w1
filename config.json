@@ -3,14 +3,15 @@
 
   "currency": "trx",
 
-  "base_bet": 0.00000001,
+  "base_bet": 0.00000004,
   "multiplier": 2.0,
+  "max_bet": 0.01,
   "chance": 49.5,
   "rule_mode": "auto",
 
   "take_profit": 0.0005,
-  "stop_loss": -0.05,
-  "cooldown_sec": 0,
+  "stop_loss": -0.5,
+  "cooldown_sec": 1.0,
 
   "debug": true,
   "auto_start": true,
