@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-WolfBet Multi-Strategy Dice Bot (patched)
-- Fix: when switching strategy, first bet uses last loss (saved in last_loss_for_switch)
-- Win resets bet for continuing same strategy
-- last_loss_for_switch is only updated on losses (so a later strategy switch can try to recover)
-- UI via rich Live
+WolfBet Multi-Strategy Dice Bot (patched: switch uses last_bet_amount)
+- UI: rich Live layout with Mode shown under speed panel
+- Win resets to base_bet
+- Auto-switch strategies (on_win / on_loss_streak)
+- When switching strategy, first bet uses last_bet_amount (not base_bet)
 """
 import json
 import time
@@ -75,12 +75,11 @@ class WolfBetBot:
 
         # runtime state
         self.session_profit = 0.0
-        self.session_count = 0                     # ensure exists
+        self.session_count = 0
         self.current_bet = self.base_bet
-        self.last_bet_amount = 0.0                 # server-reported last bet amount
-        self.last_loss_amount = 0.0                # last lost amount (updated on loss)
-        self.last_loss_for_switch = 0.0            # preserved last loss to use when switching strategies
-        self.last_outcome = None                   # "win" or "lose"
+        self.last_bet_amount = 0.0
+        self.last_loss_amount = 0.0
+        self.last_outcome = None
         self.total_bets = 0
         self.win_count = 0
         self.lose_count = 0
@@ -136,7 +135,6 @@ class WolfBetBot:
         return None
 
     def place_dice_bet(self, amount, rule, bet_value):
-        """Place bet via API and return parsed response dict or None."""
         amount = round(float(amount), 8)
         win_chance = bet_value if rule == "under" else (100.0 - bet_value)
         win_chance = max(win_chance, 0.01)
@@ -182,10 +180,6 @@ class WolfBetBot:
                 bet_value = self._cap(100.0 - ch, 0.01, 99.99)
         return rule, bet_value
 
-    def get_starting_bet_for_new_strategy(self):
-        """When switching strategy: first bet uses last_loss_for_switch if available"""
-        return self.last_loss_for_switch if (self.last_loss_for_switch and self.last_loss_for_switch > 0) else self.base_bet
-
     # ---------- strategy implementations ----------
     def strat_martingale_next(self, won):
         if won:
@@ -197,7 +191,6 @@ class WolfBetBot:
             self.fibo_seq = [self.base_bet, self.base_bet]
             self.fibo_index = 0
             return self.base_bet
-        # advance index and ensure seq
         self.fibo_index += 1
         if self.fibo_index >= len(self.fibo_seq):
             self.fibo_seq.append(self.fibo_seq[-1] + self.fibo_seq[-2])
@@ -207,7 +200,6 @@ class WolfBetBot:
         return self.base_bet
 
     def strat_jackpot_hunter_next(self, won):
-        # small raise (2-5%) relative to last bet
         if won:
             return self.base_bet
         ref = self.last_bet_amount if self.last_bet_amount > 0 else self.base_bet
@@ -280,7 +272,6 @@ class WolfBetBot:
         live.update(layout)
 
     def draw_logo(self):
-        # small colored ASCII logo (ANSI may not render in all consoles)
         try:
             gradient = ["\033[91m", "\033[93m", "\033[92m", "\033[96m", "\033[94m", "\033[95m"]
             logo = "W O L F  D I C E  B O T"
@@ -298,8 +289,8 @@ class WolfBetBot:
         old = self.current_strategy
         self.strategy_index = (self.strategy_index + 1) % len(self.strategy_cycle)
         self.current_strategy = self.strategy_cycle[self.strategy_index]
-        # set first bet for new strategy to preserved last loss (for switch) if available
-        self.current_bet = self.get_starting_bet_for_new_strategy()
+        # gunakan last bet amount sebagai starting bet strategy baru
+        self.current_bet = self.last_bet_amount if self.last_bet_amount > 0 else self.base_bet
         console.print(f"[cyan]🔁 Strategy switched ({reason}): {old} -> {self.current_strategy}[/cyan]")
 
     # ---------- main loop ----------
@@ -312,12 +303,10 @@ class WolfBetBot:
             console.print("[red]❌ Gagal dapatkan baki - semak token/endpoint[/red]")
             return
 
-        # reset runtime state
         self.session_profit = 0.0
         self.current_bet = self.base_bet
         self.last_bet_amount = 0.0
         self.last_loss_amount = 0.0
-        self.last_loss_for_switch = 0.0
         self.last_outcome = None
         self.total_bets = 0
         self.win_count = 0
@@ -330,7 +319,6 @@ class WolfBetBot:
 
         with Live(refresh_per_second=4, screen=True) as live:
             while True:
-                # stop conditions
                 if self.session_profit <= self.stop_loss:
                     console.print(f"\n[yellow]🛑 Stop-loss triggered:[/yellow] {self.session_profit:.8f} {self.currency.upper()}")
                     break
@@ -338,24 +326,18 @@ class WolfBetBot:
                     console.print(f"\n[green]✅ Take-profit triggered:[/green] {self.session_profit:.8f} {self.currency.upper()}")
                     break
 
-                # enforce max_bet if >0
                 if self.max_bet and self.max_bet > 0 and self.current_bet > self.max_bet:
                     self.current_bet = self.max_bet
 
-                # prepare override chance (strategies may set)
-                override_chance = None
+                rule, bet_value = self.chance_to_rule_and_threshold()
 
-                # compute rule & threshold (strategy funcs may set override_chance before next iter)
-                rule, bet_value = self.chance_to_rule_and_threshold(override_chance)
-
-                # place bet
                 resp = self.place_dice_bet(amount=self.current_bet, rule=rule, bet_value=bet_value)
                 if not resp or not resp.get("bet"):
                     time.sleep(self.cooldown)
                     continue
 
                 bet = resp["bet"]
-                state = bet.get("state")   # "win" or "lose"
+                state = bet.get("state")
                 profit = float(bet.get("profit", 0) or 0)
                 amount = float(bet.get("amount", self.current_bet))
                 result_value = str(bet.get("result_value", ""))
@@ -363,30 +345,23 @@ class WolfBetBot:
                 self.last_bet_amount = amount
                 self.last_outcome = state
 
-                # WIN handling: reset to base_bet for continuing same strategy
                 if state == "win":
                     self.session_profit += profit
                     self.win_count += 1
                     self.loss_streak_count = 0
-                    # DO NOT clear last_loss_for_switch here (preserve for switches)
+                    self.last_loss_amount = 0.0
                     display_profit = f"[bold green]{profit:.8f}[/bold green]"
-                    # reset strategy-related counters for continuation
                     self.current_bet = self.base_bet
                     self.fibo_seq = [self.base_bet, self.base_bet]
                     self.fibo_index = 0
-
                 else:
-                    # LOSS handling
                     loss_amount = amount
                     self.session_profit -= loss_amount
                     self.lose_count += 1
                     self.loss_streak_count += 1
                     self.last_loss_amount = loss_amount
-                    # preserve for future strategy switches
-                    self.last_loss_for_switch = loss_amount
                     display_profit = f"[red]{-loss_amount:.8f}[/red]"
 
-                    # compute next bet per active strategy (for continuation)
                     if self.current_strategy == "martingale":
                         self.current_bet = self.strat_martingale_next(False)
                     elif self.current_strategy == "fibonacci":
@@ -396,7 +371,6 @@ class WolfBetBot:
                     elif self.current_strategy == "jackpot_hunter":
                         self.current_bet = self.strat_jackpot_hunter_next(False)
                     elif self.current_strategy == "high_risk_pulse":
-                        # occasional pulse: moderate doubling every interval
                         if self.total_bets > 0 and (self.total_bets % self.high_risk_interval) == 0:
                             ref = self.last_loss_amount if self.last_loss_amount > 0 else self.base_bet
                             self.current_bet = round(ref * 2.0, 8)
@@ -407,7 +381,6 @@ class WolfBetBot:
                     else:
                         self.current_bet = self.base_bet
 
-                # add to history (show next bet)
                 arrow = "↑" if rule == "over" else "↓"
                 wl = "[bold green]WIN[/bold green]" if state == "win" else "[red]LOSE[/red]"
                 self.bet_history.append([
@@ -418,24 +391,18 @@ class WolfBetBot:
                     display_profit
                 ])
 
-                # auto-switching
                 if self.auto_strategy_change and self.strategy_cycle:
                     if self.strategy_switch_mode == "on_win" and state == "win":
-                        # switch and because last was win -> indicate win_last True so new strategy starts from base_bet
                         self.switch_to_next_strategy(reason="on_win")
                     elif self.strategy_switch_mode == "on_loss_streak" and self.loss_streak_count >= self.loss_streak_trigger:
-                        # switch and because triggered by losses -> new strategy first bet should attempt recover using last_loss_for_switch
-                        # set current_bet using last_loss_for_switch inside switch_to_next_strategy
                         self.switch_to_next_strategy(reason="on_loss_streak")
                         self.loss_streak_count = 0
 
-                # update UI
                 self._update_ui(start_balance, start_balance + self.session_profit, self.total_bets, self.win_count, self.lose_count, live)
                 time.sleep(self.cooldown)
 
-        # final summary
         final_runtime = time.strftime("%H:%M:%S", time.gmtime(int(time.time() - self.start_time)))
-        console.print(self._summary_panel(start_balance, start_balance + self.session_profit, self.total_bets, self.win_count, self.lose_count))
+        console.print(self._summary_panel(start_balance, start_balance + self.session_profit, self.total_bets, self.win_count, self.lose_count, final_runtime))
 
 
 if __name__ == "__main__":
