@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-WolfBet Multi-Strategy Dice Bot (final patched)
-- Auto-switch on_win / on_loss_streak
-- Win resets to base_bet
-- When switching strategy, first bet uses last_loss_amount (fallback base_bet)
-- Strategies: martingale (classic), fibonacci, flat, jackpot_hunter, high_risk_pulse, randomized
-- UI: Rich with speed panel showing Mode
+WolfBet Multi-Strategy Dice Bot (patched version)
+- Fix: session_count attribute
+- Fix: martingale reset ke base_bet bila win (classic style)
+- Fix: auto strategy switch, bet pertama ikut last_loss_amount
 """
+
 import json
 import time
 import random
@@ -24,7 +23,6 @@ API_BASE = "https://wolfbet.com/api/v1"
 
 class WolfBetBot:
     def __init__(self, cfg_path="config.json"):
-        # load config
         with open(cfg_path, "r") as f:
             self.cfg = json.load(f)
 
@@ -42,8 +40,8 @@ class WolfBetBot:
         # core settings
         self.currency = str(self.cfg.get("currency", "btc")).lower()
         self.base_bet = float(self.cfg.get("base_bet", 0.00000001))
-        self.multiplier = float(self.cfg.get("multiplier", 2.0))   # martingale multiplier
-        self.max_bet = float(self.cfg.get("max_bet", 0.0))         # 0 disables cap
+        self.multiplier = float(self.cfg.get("multiplier", 2.0))
+        self.max_bet = float(self.cfg.get("max_bet", 0.0001))
         self.chance = float(self.cfg.get("chance", 49.5))
         self.rule_mode = str(self.cfg.get("rule_mode", "auto")).lower()
         self.take_profit = float(self.cfg.get("take_profit", 0.0005))
@@ -53,48 +51,48 @@ class WolfBetBot:
         self.auto_start = bool(self.cfg.get("auto_start", False))
         self.auto_start_delay = int(self.cfg.get("auto_start_delay", 5))
 
-        # strategies
+        # strategy config
         self.strategy = str(self.cfg.get("strategy", "martingale")).lower()
-        self.auto_strategy_change = bool(self.cfg.get("auto_strategy_change", False))
+        self.auto_strategy_change = bool(self.cfg.get("auto_strategy_change", True))
         self.strategy_cycle = [s.lower() for s in self.cfg.get("strategy_cycle", [self.strategy])]
         self.strategy_switch_mode = str(self.cfg.get("strategy_switch_mode", "on_win")).lower()
         self.loss_streak_trigger = int(self.cfg.get("loss_streak_trigger", 5))
 
-        # jackpot/high-risk/randomized params
-        self.jackpot_chance = float(self.cfg.get("jackpot_chance", 1.0))
-        self.jackpot_raise_min = float(self.cfg.get("jackpot_raise_min_pct", 1.02))
-        self.jackpot_raise_max = float(self.cfg.get("jackpot_raise_max_pct", 1.05))
+        # jackpot & high-risk parameters
+        self.jackpot_chance = float(self.cfg.get("jackpot_chance", 1.0))  # percent
+        self.jackpot_raise_min = float(self.cfg.get("jackpot_raise_min_pct", 1.02))  # 2%
+        self.jackpot_raise_max = float(self.cfg.get("jackpot_raise_max_pct", 1.05))  # 5%
 
-        self.high_risk_chance = float(self.cfg.get("high_risk_chance", 5.0))
-        self.high_risk_raise_min = float(self.cfg.get("high_risk_raise_min_pct", 1.10))
-        self.high_risk_raise_max = float(self.cfg.get("high_risk_raise_max_pct", 1.20))
+        self.high_risk_chance = float(self.cfg.get("high_risk_chance", 5.0))  # percent
+        self.high_risk_raise_min = float(self.cfg.get("high_risk_raise_min_pct", 1.10))  # 10%
+        self.high_risk_raise_max = float(self.cfg.get("high_risk_raise_max_pct", 1.20))  # 20%
         self.high_risk_interval = int(self.cfg.get("high_risk_interval", 20))
 
+        # randomized config
         self.randomized_mode = str(self.cfg.get("randomized_mode", "multiplier")).lower()
         self.randomized_min_mult = float(self.cfg.get("randomized_min_mult", 1.02))
-        self.randomized_max_mult = float(self.cfg.get("randomized_max_mult", 1.5))
+        self.randomized_max_mult = float(self.cfg.get("randomized_max_mult", 1.35))
 
         # runtime state
         self.session_profit = 0.0
+        self.session_count = 0   # ✅ PATCH: tambah attribute
         self.current_bet = self.base_bet
-        self.last_bet_amount = 0.0    # last placed bet (server reported)
-        self.last_loss_amount = 0.0   # last lost bet amount (useful for start-on-switch)
-        self.last_outcome = None      # "win" or "lose"
+        self.bet_history = []
+        self.start_time = None
+        self.loss_streak_total = 0.0
+        self.loss_streak_count = 0
         self.total_bets = 0
         self.win_count = 0
         self.lose_count = 0
-        self.loss_streak_count = 0
-        self.start_time = None
-        self.bet_history = []
-        # fibonacci state
-        self.fibo_seq = [self.base_bet, self.base_bet]
-        self.fibo_index = 0
-        # strategy index
         self.current_strategy = self.strategy
         self.strategy_index = (self.strategy_cycle.index(self.strategy)
                                if self.strategy in self.strategy_cycle else 0)
+        self.last_loss_amount = self.base_bet
+        self.last_outcome = None
+        self.override_chance = None
+        self.fibo_seq = [self.base_bet]
 
-    # ---------- HTTP helpers ----------
+    # -------------------- HTTP --------------------
     def _get(self, path):
         try:
             r = requests.get(f"{API_BASE}{path}", headers=self.headers, timeout=20)
@@ -113,35 +111,23 @@ class WolfBetBot:
                 console.print(f"[yellow]⚠️ POST {path} error:[/yellow] {e}")
             return None
 
-    def get_balances(self):
+    def get_balance_currency(self, currency):
         r = self._get("/user/balances")
         if not r:
             return None
         try:
-            return r.json().get("balances", [])
+            for b in r.json().get("balances", []):
+                if str(b.get("currency", "")).lower() == currency.lower():
+                    return float(b.get("amount", 0))
         except Exception:
             return None
-
-    def get_balance_currency(self, currency):
-        balances = self.get_balances()
-        if not balances:
-            return None
-        for b in balances:
-            if str(b.get("currency", "")).lower() == currency.lower():
-                try:
-                    return float(b.get("amount"))
-                except Exception:
-                    return None
         return None
 
     def place_dice_bet(self, amount, rule, bet_value):
-        """Place bet via API and return parsed response dict or None"""
         amount = round(float(amount), 8)
         win_chance = bet_value if rule == "under" else (100.0 - bet_value)
         win_chance = max(win_chance, 0.01)
-        multiplier = 99.0 / win_chance
-        multiplier = float(f"{multiplier:.4f}")
-
+        multiplier = float(f"{99.0 / win_chance:.4f}")
         payload = {
             "currency": self.currency,
             "game": "dice",
@@ -158,405 +144,158 @@ class WolfBetBot:
         except Exception:
             return None
 
-    # ---------- helpers ----------
-    @staticmethod
-    def _cap(val, lo, hi):
-        return max(lo, min(hi, val))
+    # -------------------- Strategy --------------------
+    def strat_martingale(self, win, last_bet):
+        if win:
+            return self.base_bet   # ✅ classic martingale reset
+        return last_bet * self.multiplier
 
-    def chance_to_rule_and_threshold(self, chance_override=None):
-        ch = chance_override if chance_override is not None else self.chance
-        ch = self._cap(ch, 0.01, 99.99)
-        if self.rule_mode == "over":
-            rule = "over"
-            bet_value = self._cap(100.0 - ch, 0.01, 99.99)
-        elif self.rule_mode == "under":
-            rule = "under"
-            bet_value = self._cap(ch, 0.01, 99.99)
+    def strat_fibonacci(self, win):
+        if win:
+            self.fibo_seq = [self.base_bet]
+            return self.base_bet
+        if len(self.fibo_seq) < 2:
+            self.fibo_seq.append(self.base_bet)
         else:
-            if random.randint(0, 1) == 1:
-                rule = "under"
-                bet_value = ch
-            else:
-                rule = "over"
-                bet_value = 100.0 - ch
-        return rule, bet_value
-
-    def get_starting_bet_for_new_strategy(self):
-        """When switching strategy, first bet should use last_loss_amount (if exists), else base_bet"""
-        return self.last_loss_amount if self.last_loss_amount and self.last_loss_amount > 0 else self.base_bet
-
-    # ---------- strategy implementations ----------
-    def strat_martingale_next(self, won):
-        if won:
-            return self.base_bet
-        return round(max(self.current_bet * self.multiplier, self.base_bet), 8)
-
-    def strat_fibonacci_next(self, won):
-        if won:
-            self.fibo_seq = [self.base_bet, self.base_bet]
-            self.fibo_index = 0
-            return self.base_bet
-        # advance index and ensure sequence
-        self.fibo_index += 1
-        if self.fibo_index >= len(self.fibo_seq):
             self.fibo_seq.append(self.fibo_seq[-1] + self.fibo_seq[-2])
-        return round(self.fibo_seq[self.fibo_index], 8)
+        return self.fibo_seq[-1]
 
-    def strat_flat_next(self, won):
+    def strat_flat(self, win, last_bet):
         return self.base_bet
 
-    def strat_jackpot_hunter_next(self, won):
-        # first bet after switch uses get_starting_bet_for_new_strategy (handled elsewhere)
-        if won:
+    def strat_jackpot_hunter(self, win):
+        self.override_chance = self.jackpot_chance
+        if win:
             return self.base_bet
-        # on loss, small raise from last_bet_amount
         factor = random.uniform(self.jackpot_raise_min, self.jackpot_raise_max)
-        ref = self.last_bet_amount if self.last_bet_amount > 0 else self.base_bet
-        return round(ref * factor, 8)
+        return self.current_bet * factor
 
-    def strat_high_risk_pulse_next(self, won):
-        if won:
+    def strat_high_risk_pulse(self, win):
+        self.override_chance = self.high_risk_chance
+        if win:
             return self.base_bet
         factor = random.uniform(self.high_risk_raise_min, self.high_risk_raise_max)
-        ref = self.last_bet_amount if self.last_bet_amount > 0 else self.base_bet
-        # occasional pulse handled by driver via total_bets % interval
-        return round(ref * factor, 8)
+        return self.current_bet * factor
 
-    def strat_randomized_next(self, won):
-        if won:
-            return self.base_bet
+    def strat_randomized(self):
         if self.randomized_mode == "multiplier":
-            mult = random.uniform(self.randomized_min_mult, self.randomized_max_mult)
-            ref = self.last_bet_amount if self.last_bet_amount > 0 else self.base_bet
-            return round(ref * mult, 8)
+            factor = random.uniform(self.randomized_min_mult, self.randomized_max_mult)
+            return self.current_bet * factor
         else:
             upper = max(self.last_loss_amount, self.base_bet)
-            return round(random.uniform(self.base_bet, upper), 8)
+            return random.uniform(self.base_bet, upper)
 
-    # ---------- UI helpers ----------
-    def _summary_panel(self, start_balance, current_balance, total_bets, win, lose, runtime):
-        txt = f"""
-[bold yellow]🏦 Baki Awal :[/bold yellow] {start_balance:.8f} {self.currency.upper()}
-[bold cyan]💱 Baki Sekarang:[/bold cyan] {current_balance:.8f} {self.currency.upper()}
-[bold green]🏧 Profit/Rugi:[/bold green] {self.session_profit:.8f} {self.currency.upper()}
-[bold magenta]🔄 Jumlah BET :[/bold magenta] {total_bets} (WIN {win} / LOSE {lose})
-[bold white]⏰ Runtime :[/bold white] {runtime}
-[bold red]🚦 Session :[/bold red] {self.session_count}
-"""
-        return Panel(txt, title="📊 Ringkasan Sesi", border_style="bold blue")
-
-    def _bet_table(self):
-        table = Table(show_header=True, header_style="bold magenta")
-        table.add_column("Target")
-        table.add_column("Result")
-        table.add_column("Bet Next")
-        table.add_column("W/L")
-        table.add_column("Profit")
-        for row in self.bet_history[-32:]:
-            table.add_row(*row)
-        return table
-
-    def _speed_panel(self, total_bets):
-        elapsed = max(1, int(time.time() - self.start_time))
-        speed = round(total_bets / elapsed, 2)
-        tbl = Table.grid(expand=True)
-        tbl.add_column("k", ratio=2)
-        tbl.add_column("v", ratio=4)
-        tbl.add_row("[yellow]BetSpeed[/yellow]", f"[magenta]{speed} bets/sec[/magenta]")
-        tbl.add_row("[yellow]Mode[/yellow]", f"[cyan bold]{self.current_strategy.upper()}[/cyan bold]")
-        return Panel(tbl, title="[ GUNA VPS UNTUK + SPEED ]", border_style="green")
-
-    def _update_ui(self, start_balance, current_balance, total_bets, win, lose, live):
-        elapsed = int(time.time() - self.start_time)
-        runtime_str = time.strftime("%H:%M:%S", time.gmtime(elapsed))
-        layout = Layout()
-        layout.split(
-            Layout(name="summary", size=11),
-            Layout(name="bets", ratio=3),
-            Layout(name="speed", size=6)
-        )
-        layout["summary"].update(self._summary_panel(start_balance, current_balance, total_bets, win, lose, runtime_str))
-        layout["bets"].update(self._bet_table())
-        layout["speed"].update(self._speed_panel(total_bets))
-        live.update(layout)
-
-    def draw_logo(self):
-        # small colored ASCII logo (ANSI may not render in all terminals)
-        try:
-            gradient = ["\033[91m", "\033[93m", "\033[92m", "\033[96m", "\033[94m", "\033[95m"]
-            logo = "W O L F  D I C E  B O T"
-            for i, c in enumerate(logo):
-                print(f"{gradient[i % len(gradient)]}{c}\033[0m", end="")
-            print("\n")
-            print("🎲🐺  🎲🐺  🎲🐺  🎲🐺  🎲🐺\n")
-        except Exception:
-            console.print("[bold cyan]WOLF DICE BOT[/bold cyan]\n")
-
-    # ---------- strategy switching ----------
-    def switch_to_next_strategy(self, reason="auto"):
-        if not self.strategy_cycle:
-            return
+    # -------------------- Strategy Switch --------------------
+    def switch_strategy(self):
         old = self.current_strategy
         self.strategy_index = (self.strategy_index + 1) % len(self.strategy_cycle)
         self.current_strategy = self.strategy_cycle[self.strategy_index]
-        # when switching strategy, first bet should use last_loss_amount (if any)
-        self.current_bet = self.get_starting_bet_for_new_strategy()
-        console.print(f"[cyan]🔁 Strategy switched ({reason}): {old} -> {self.current_strategy}[/cyan]")
+        console.print(f"[yellow]🔁 Strategy switched: {old} -> {self.current_strategy}[/yellow]")
 
-    # ---------- main loop ----------
+        # ✅ first bet ikut last_loss_amount kalau ada
+        if self.last_loss_amount > self.base_bet:
+            self.current_bet = self.last_loss_amount
+        else:
+            self.current_bet = self.base_bet
+
+    # -------------------- Main Loop --------------------
     def main_loop(self):
         console.clear()
-        self.draw_logo()
         start_balance = self.get_balance_currency(self.currency)
         if start_balance is None:
-            console.print("[red]❌ Gagal dapatkan baki - semak token/endpoint[/red]")
+            console.print("[red]❌ Failed get balance[/red]")
             return
 
-        # reset runtime state
         self.session_profit = 0.0
         self.current_bet = self.base_bet
-        self.last_bet_amount = 0.0
-        self.last_loss_amount = 0.0
-        self.last_outcome = None
+        self.bet_history = []
+        self.start_time = time.time()
+        self.loss_streak_total = 0.0
+        self.loss_streak_count = 0
+        self.last_loss_amount = self.base_bet
         self.total_bets = 0
         self.win_count = 0
         self.lose_count = 0
-        self.loss_streak_count = 0
-        self.start_time = time.time()
-        self.bet_history = []
-
-        console.print(f"[green]💰 Baki awal:[/green] {start_balance:.8f} {self.currency.upper()}  |  [blue]Start strategy:[/blue] {self.current_strategy}\n")
+        self.current_strategy = self.strategy
+        self.strategy_index = self.strategy_cycle.index(self.current_strategy)
 
         with Live(refresh_per_second=4, screen=True) as live:
             while True:
-                # stop conditions
-                if self.session_profit <= self.stop_loss:
-                    console.print(f"\n[yellow]🛑 Stop-loss triggered:[/yellow] {self.session_profit:.8f} {self.currency.upper()}")
-                    break
-                if self.session_profit >= self.take_profit:
-                    console.print(f"\n[green]✅ Take-profit triggered:[/green] {self.session_profit:.8f} {self.currency.upper()}")
+                if self.session_profit <= self.stop_loss or self.session_profit >= self.take_profit:
                     break
 
-                # enforce max_bet if >0
-                if self.max_bet and self.max_bet > 0 and self.current_bet > self.max_bet:
-                    self.current_bet = self.max_bet
-
-                # some strategies may set override chance; we clear by default
-                override_chance = None
-
-                # compute rule and threshold (possible override)
-                rule, bet_value = self.chance_to_rule_and_threshold(override_chance)
-
-                # place bet
-                resp = self.place_dice_bet(amount=self.current_bet, rule=rule, bet_value=bet_value)
-                if not resp or not resp.get("bet"):
+                rule = "under" if random.randint(0, 1) else "over"
+                bet_value = self.chance if rule == "under" else 100 - self.chance
+                data = self.place_dice_bet(self.current_bet, rule, bet_value)
+                if not data:
                     time.sleep(self.cooldown)
                     continue
 
-                bet = resp["bet"]
-                state = bet.get("state")   # "win" or something else
-                profit = float(bet.get("profit", 0) or 0)
-                amount = float(bet.get("amount", self.current_bet))
-                result_value = str(bet.get("result_value", ""))
+                bet = data.get("bet")
+                if not bet:
+                    time.sleep(self.cooldown)
+                    continue
+
+                state = bet.get("state")
+                profit = float(bet.get("profit", 0))
                 self.total_bets += 1
-                self.last_bet_amount = amount
                 self.last_outcome = state
 
-                # WIN handling: reset to base_bet
                 if state == "win":
                     self.session_profit += profit
                     self.win_count += 1
+                    self.loss_streak_total = 0
                     self.loss_streak_count = 0
-                    self.last_loss_amount = 0.0
-                    display_profit = f"[bold green]{profit:.8f}[/bold green]"
-                    # reset bets for strategies that depend on win
-                    self.current_bet = self.base_bet
-                    self.fibo_seq = [self.base_bet, self.base_bet]
-                    self.fibo_index = 0
-                else:
-                    # LOSS handling
-                    loss_amount = amount
+                    self.last_loss_amount = self.base_bet
+
+                    if self.current_strategy == "martingale":
+                        self.current_bet = self.strat_martingale(True, self.current_bet)
+                    elif self.current_strategy == "fibonacci":
+                        self.current_bet = self.strat_fibonacci(True)
+                    elif self.current_strategy == "flat":
+                        self.current_bet = self.strat_flat(True, self.current_bet)
+                    elif self.current_strategy == "jackpot_hunter":
+                        self.current_bet = self.strat_jackpot_hunter(True)
+                    elif self.current_strategy == "high_risk_pulse":
+                        self.current_bet = self.strat_high_risk_pulse(True)
+                    elif self.current_strategy == "randomized":
+                        self.current_bet = self.strat_randomized()
+
+                    if self.auto_strategy_change and self.strategy_switch_mode == "on_win":
+                        self.switch_strategy()
+
+                else:  # lose
+                    loss_amount = float(bet.get("amount", self.current_bet))
                     self.session_profit -= loss_amount
                     self.lose_count += 1
                     self.loss_streak_count += 1
+                    self.loss_streak_total += loss_amount
                     self.last_loss_amount = loss_amount
-                    display_profit = f"[red]{-loss_amount:.8f}[/red]"
 
-                    # compute next bet according to current_strategy
                     if self.current_strategy == "martingale":
-                        self.current_bet = self.strat_martingale_next(False)
+                        self.current_bet = self.strat_martingale(False, self.current_bet)
                     elif self.current_strategy == "fibonacci":
-                        self.current_bet = self.strat_fibonacci_next(False)
+                        self.current_bet = self.strat_fibonacci(False)
                     elif self.current_strategy == "flat":
-                        self.current_bet = self.strat_flat_next(False)
+                        self.current_bet = self.strat_flat(False, self.current_bet)
                     elif self.current_strategy == "jackpot_hunter":
-                        self.current_bet = self.strat_jackpot_hunter_next(False)
+                        self.current_bet = self.strat_jackpot_hunter(False)
                     elif self.current_strategy == "high_risk_pulse":
-                        # occasional pulse logic: if want a pulse, double the ref
-                        if self.total_bets > 0 and (self.total_bets % self.high_risk_interval) == 0:
-                            # use last_loss_amount as ref for pulse
-                            ref = self.last_loss_amount if self.last_loss_amount > 0 else self.base_bet
-                            self.current_bet = round(ref * 2.0, 8)
-                        else:
-                            self.current_bet = self.strat_high_risk_pulse_next(False)
+                        self.current_bet = self.strat_high_risk_pulse(False)
                     elif self.current_strategy == "randomized":
-                        self.current_bet = self.strat_randomized_next(False)
-                    else:
-                        self.current_bet = self.base_bet
+                        self.current_bet = self.strat_randomized()
 
-                # record history (next bet displayed is current_bet)
-                arrow = "↑" if rule == "over" else "↓"
-                wl = "[bold green]WIN[/bold green]" if state == "win" else "[red]LOSE[/red]"
-                self.bet_history.append([
-                    f"{bet_value:.2f}[cyan]{arrow}[/cyan]",
-                    result_value,
-                    f"{self.current_bet:.8f}",
-                    wl,
-                    display_profit
-                ])
+                    if self.auto_strategy_change and self.strategy_switch_mode == "on_loss_streak":
+                        if self.loss_streak_count >= self.loss_streak_trigger:
+                            self.switch_strategy()
+                            self.loss_streak_count = 0
 
-                # Auto-switching
-                if self.auto_strategy_change and self.strategy_cycle:
-                    if self.strategy_switch_mode == "on_win" and state == "win":
-                        # switch on win: next strategy first bet uses last_loss_amount (if any)
-                        self.switch_to_next_strategy(reason="on_win")
-                    elif self.strategy_switch_mode == "on_loss_streak" and self.loss_streak_count >= self.loss_streak_trigger:
-                        # switch on loss streak
-                        self.switch_to_next_strategy(reason="on_loss_streak")
-                        # reset loss streak counter after switch to avoid repeated immediate switches
-                        self.loss_streak_count = 0
-
-                # update UI
-                current_balance = start_balance + self.session_profit
-                self._update_ui(start_balance, current_balance, self.total_bets, self.win_count, self.lose_count, Live, )  # placeholder live param
-                # Note: above call expects a Live object in the loop; but we already update via live.update earlier.
-                # In this implementation we used Live context and _update_ui is called by live variable in context below.
-
-                # Sleep cooldown
                 time.sleep(self.cooldown)
-
-        # final summary printed after loop
-        final_runtime = time.strftime("%H:%M:%S", time.gmtime(int(time.time() - self.start_time)))
-        console.print(self._summary_panel(start_balance, start_balance + self.session_profit, self.total_bets, self.win_count, self.lose_count, final_runtime))
 
     def run(self):
-        self.session_count += 1
-        # Use Live properly here to pass live object into _update_ui calls
-        console.clear()
-        self.draw_logo()
-        start_balance = self.get_balance_currency(self.currency)
-        if start_balance is None:
-            console.print("[red]❌ Gagal dapatkan baki - semak token/endpoint[/red]")
-            return
+        self.session_count += 1  # ✅ now attribute exists
+        self.main_loop()
 
-        self.session_profit = 0.0
-        self.current_bet = self.base_bet
-        self.last_bet_amount = 0.0
-        self.last_loss_amount = 0.0
-        self.last_outcome = None
-        self.total_bets = 0
-        self.win_count = 0
-        self.lose_count = 0
-        self.loss_streak_count = 0
-        self.start_time = time.time()
-        self.bet_history = []
-
-        console.print(f"[green]💰 Baki awal:[/green] {start_balance:.8f} {self.currency.upper()}  |  [blue]Start strategy:[/blue] {self.current_strategy}\n")
-
-        with Live(refresh_per_second=4, screen=True) as live:
-            while True:
-                # stop checks
-                if self.session_profit <= self.stop_loss:
-                    console.print(f"\n[yellow]🛑 Stop-loss triggered:[/yellow] {self.session_profit:.8f} {self.currency.upper()}")
-                    break
-                if self.session_profit >= self.take_profit:
-                    console.print(f"\n[green]✅ Take-profit triggered:[/green] {self.session_profit:.8f} {self.currency.upper()}")
-                    break
-
-                # cap
-                if self.max_bet and self.max_bet > 0 and self.current_bet > self.max_bet:
-                    self.current_bet = self.max_bet
-
-                # compute rule & bet_value
-                override_chance = None
-                rule, bet_value = self.chance_to_rule_and_threshold(override_chance)
-
-                resp = self.place_dice_bet(amount=self.current_bet, rule=rule, bet_value=bet_value)
-                if not resp or not resp.get("bet"):
-                    time.sleep(self.cooldown)
-                    continue
-
-                bet = resp["bet"]
-                state = bet.get("state")
-                profit = float(bet.get("profit", 0) or 0)
-                amount = float(bet.get("amount", self.current_bet))
-                result_value = str(bet.get("result_value", ""))
-                self.total_bets += 1
-                self.last_bet_amount = amount
-                self.last_outcome = state
-
-                if state == "win":
-                    self.session_profit += profit
-                    self.win_count += 1
-                    self.loss_streak_count = 0
-                    self.last_loss_amount = 0.0
-                    display_profit = f"[bold green]{profit:.8f}[/bold green]"
-                    self.current_bet = self.base_bet
-                    self.fibo_seq = [self.base_bet, self.base_bet]
-                    self.fibo_index = 0
-                else:
-                    loss_amount = amount
-                    self.session_profit -= loss_amount
-                    self.lose_count += 1
-                    self.loss_streak_count += 1
-                    self.last_loss_amount = loss_amount
-                    display_profit = f"[red]{-loss_amount:.8f}[/red]"
-                    # pick next bet using strategy-specific functions
-                    if self.current_strategy == "martingale":
-                        self.current_bet = self.strat_martingale_next(False)
-                    elif self.current_strategy == "fibonacci":
-                        self.current_bet = self.strat_fibonacci_next(False)
-                    elif self.current_strategy == "flat":
-                        self.current_bet = self.strat_flat_next(False)
-                    elif self.current_strategy == "jackpot_hunter":
-                        self.current_bet = self.strat_jackpot_hunter_next(False)
-                    elif self.current_strategy == "high_risk_pulse":
-                        if self.total_bets > 0 and (self.total_bets % self.high_risk_interval) == 0:
-                            ref = self.last_loss_amount if self.last_loss_amount > 0 else self.base_bet
-                            self.current_bet = round(ref * 2.0, 8)
-                        else:
-                            self.current_bet = self.strat_high_risk_pulse_next(False)
-                    elif self.current_strategy == "randomized":
-                        self.current_bet = self.strat_randomized_next(False)
-                    else:
-                        self.current_bet = self.base_bet
-
-                # log history
-                arrow = "↑" if rule == "over" else "↓"
-                wl = "[bold green]WIN[/bold green]" if state == "win" else "[red]LOSE[/red]"
-                self.bet_history.append([
-                    f"{bet_value:.2f}[cyan]{arrow}[/cyan]",
-                    result_value,
-                    f"{self.current_bet:.8f}",
-                    wl,
-                    display_profit
-                ])
-
-                # auto switching
-                if self.auto_strategy_change and self.strategy_cycle:
-                    if self.strategy_switch_mode == "on_win" and state == "win":
-                        self.switch_to_next_strategy(reason="on_win")
-                    elif self.strategy_switch_mode == "on_loss_streak" and self.loss_streak_count >= self.loss_streak_trigger:
-                        self.switch_to_next_strategy(reason="on_loss_streak")
-                        self.loss_streak_count = 0
-
-                # update UI
-                self._update_ui(start_balance, start_balance + self.session_profit, self.total_bets, self.win_count, self.lose_count, live)
-                time.sleep(self.cooldown)
-
-        # final summary print
-        final_runtime = time.strftime("%H:%M:%S", time.gmtime(int(time.time() - self.start_time)))
-        console.print(self._summary_panel(start_balance, start_balance + self.session_profit, self.total_bets, self.win_count, self.lose_count))
 
 if __name__ == "__main__":
     bot = WolfBetBot("config.json")
@@ -564,5 +303,5 @@ if __name__ == "__main__":
         bot.run()
         if not bot.auto_start:
             break
-        console.print(f"\n[cyan]🔄 Auto-restart in {bot.auto_start_delay} seconds...[/cyan]")
+        console.print(f"\n[cyan]🔄 Auto-restart in {bot.auto_start_delay} sec...[/cyan]")
         time.sleep(bot.auto_start_delay)
