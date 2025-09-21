@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-WolfBet Multi-Strategy Dice Bot (patched final)
-- UI: rich Live layout with Mode shown under speed panel
-- Win resets to base_bet
-- Auto-switch strategies (on_win / on_loss_streak)
-- When switching strategy, first bet uses last_loss_amount if available
+WolfBet Multi-Strategy Dice Bot (patched)
+- Fix: when switching strategy, first bet uses last loss (saved in last_loss_for_switch)
+- Win resets bet for continuing same strategy
+- last_loss_for_switch is only updated on losses (so a later strategy switch can try to recover)
+- UI via rich Live
 """
 import json
 import time
@@ -75,10 +75,11 @@ class WolfBetBot:
 
         # runtime state
         self.session_profit = 0.0
-        self.session_count = 0                     # FIX: ensure exists
+        self.session_count = 0                     # ensure exists
         self.current_bet = self.base_bet
         self.last_bet_amount = 0.0                 # server-reported last bet amount
-        self.last_loss_amount = 0.0                # last lost amount (used for start-on-switch)
+        self.last_loss_amount = 0.0                # last lost amount (updated on loss)
+        self.last_loss_for_switch = 0.0            # preserved last loss to use when switching strategies
         self.last_outcome = None                   # "win" or "lose"
         self.total_bets = 0
         self.win_count = 0
@@ -182,8 +183,8 @@ class WolfBetBot:
         return rule, bet_value
 
     def get_starting_bet_for_new_strategy(self):
-        """When switching strategy: first bet uses last_loss_amount if available"""
-        return self.last_loss_amount if self.last_loss_amount and self.last_loss_amount > 0 else self.base_bet
+        """When switching strategy: first bet uses last_loss_for_switch if available"""
+        return self.last_loss_for_switch if (self.last_loss_for_switch and self.last_loss_for_switch > 0) else self.base_bet
 
     # ---------- strategy implementations ----------
     def strat_martingale_next(self, won):
@@ -218,7 +219,6 @@ class WolfBetBot:
             return self.base_bet
         ref = self.last_bet_amount if self.last_bet_amount > 0 else self.base_bet
         factor = random.uniform(self.high_risk_raise_min, self.high_risk_raise_max)
-        # occasional pulse handled elsewhere (driver)
         return round(ref * factor, 8)
 
     def strat_randomized_next(self, won):
@@ -298,7 +298,7 @@ class WolfBetBot:
         old = self.current_strategy
         self.strategy_index = (self.strategy_index + 1) % len(self.strategy_cycle)
         self.current_strategy = self.strategy_cycle[self.strategy_index]
-        # set first bet for new strategy to last_loss_amount if available
+        # set first bet for new strategy to preserved last loss (for switch) if available
         self.current_bet = self.get_starting_bet_for_new_strategy()
         console.print(f"[cyan]🔁 Strategy switched ({reason}): {old} -> {self.current_strategy}[/cyan]")
 
@@ -317,6 +317,7 @@ class WolfBetBot:
         self.current_bet = self.base_bet
         self.last_bet_amount = 0.0
         self.last_loss_amount = 0.0
+        self.last_loss_for_switch = 0.0
         self.last_outcome = None
         self.total_bets = 0
         self.win_count = 0
@@ -362,14 +363,14 @@ class WolfBetBot:
                 self.last_bet_amount = amount
                 self.last_outcome = state
 
-                # WIN handling: reset to base_bet
+                # WIN handling: reset to base_bet for continuing same strategy
                 if state == "win":
                     self.session_profit += profit
                     self.win_count += 1
                     self.loss_streak_count = 0
-                    self.last_loss_amount = 0.0
+                    # DO NOT clear last_loss_for_switch here (preserve for switches)
                     display_profit = f"[bold green]{profit:.8f}[/bold green]"
-                    # reset strategy-related counters
+                    # reset strategy-related counters for continuation
                     self.current_bet = self.base_bet
                     self.fibo_seq = [self.base_bet, self.base_bet]
                     self.fibo_index = 0
@@ -381,9 +382,11 @@ class WolfBetBot:
                     self.lose_count += 1
                     self.loss_streak_count += 1
                     self.last_loss_amount = loss_amount
+                    # preserve for future strategy switches
+                    self.last_loss_for_switch = loss_amount
                     display_profit = f"[red]{-loss_amount:.8f}[/red]"
 
-                    # compute next bet per active strategy
+                    # compute next bet per active strategy (for continuation)
                     if self.current_strategy == "martingale":
                         self.current_bet = self.strat_martingale_next(False)
                     elif self.current_strategy == "fibonacci":
@@ -418,8 +421,11 @@ class WolfBetBot:
                 # auto-switching
                 if self.auto_strategy_change and self.strategy_cycle:
                     if self.strategy_switch_mode == "on_win" and state == "win":
+                        # switch and because last was win -> indicate win_last True so new strategy starts from base_bet
                         self.switch_to_next_strategy(reason="on_win")
                     elif self.strategy_switch_mode == "on_loss_streak" and self.loss_streak_count >= self.loss_streak_trigger:
+                        # switch and because triggered by losses -> new strategy first bet should attempt recover using last_loss_for_switch
+                        # set current_bet using last_loss_for_switch inside switch_to_next_strategy
                         self.switch_to_next_strategy(reason="on_loss_streak")
                         self.loss_streak_count = 0
 
@@ -430,6 +436,7 @@ class WolfBetBot:
         # final summary
         final_runtime = time.strftime("%H:%M:%S", time.gmtime(int(time.time() - self.start_time)))
         console.print(self._summary_panel(start_balance, start_balance + self.session_profit, self.total_bets, self.win_count, self.lose_count))
+
 
 if __name__ == "__main__":
     bot = WolfBetBot("config.json")
