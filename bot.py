@@ -392,6 +392,5 @@ if __name__ == "__main__":
         bot.run()
         if not bot.auto_start:
             break
-        console.print(f"
-[cyan]🔄 Auto-restart in {bot.auto_start_delay} seconds...[/cyan]")
+        console.print(f"[cyan]🔄 Auto-restart in {bot.auto_start_delay} seconds...[/cyan]")
         time.sleep(bot.auto_start_delay)
