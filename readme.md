@@ -76,7 +76,7 @@ python bot.py
 ```
 
 ## 📸 Contoh UI
-![UI Screenshot](A_screenshot_of_a_terminal-based_user_interface_di.png)
+![UI Screenshot](1.png)
 
 ---
 ⚠️ **Disclaimer**: Bot ini untuk tujuan eksperimen. Penggunaan sebenar di platform perjudian adalah risiko anda sendiri.
