@@ -76,7 +76,8 @@ python bot.py
 ```
 
 ## 📸 Contoh UI
-![UI Screenshot](1.png)
+![UI Screenshot](<img width="1024" height="1536" alt="ChatGPT Image Sep 21, 2025, 12_58_39 PM" src="https://github.com/user-attachments/assets/a489aee0-b77b-4dcf-abcf-95734c3f248b" />
+)
 
 ---
 ⚠️ **Disclaimer**: Bot ini untuk tujuan eksperimen. Penggunaan sebenar di platform perjudian adalah risiko anda sendiri.
