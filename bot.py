@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-WolfBet Multi-Strategy Dice Bot (patched: switch uses last_bet_amount)
+WolfBet Multi-Strategy Dice Bot (patched)
 - UI: rich Live layout with Mode shown under speed panel
 - Win resets to base_bet
 - Auto-switch strategies (on_win / on_loss_streak)
-- When switching strategy, first bet uses last_bet_amount (not base_bet)
+- Pilihan mula strategy baru:
+    * "last_bet"  -> guna bet terakhir
+    * "last_loss" -> guna amount kalah terakhir
+    * default -> base_bet
 """
 import json
 import time
@@ -57,13 +60,11 @@ class WolfBetBot:
         self.strategy_cycle = [s.lower() for s in self.cfg.get("strategy_cycle", [self.strategy])]
         self.strategy_switch_mode = str(self.cfg.get("strategy_switch_mode", "on_win")).lower()
         self.loss_streak_trigger = int(self.cfg.get("loss_streak_trigger", 5))
+        self.strategy_start_mode = str(self.cfg.get("strategy_start_mode", "last_bet")).lower()
 
         # jackpot & high-risk parameters
-        self.jackpot_chance = float(self.cfg.get("jackpot_chance", 1.0))
         self.jackpot_raise_min = float(self.cfg.get("jackpot_raise_min_pct", 1.02))
         self.jackpot_raise_max = float(self.cfg.get("jackpot_raise_max_pct", 1.05))
-
-        self.high_risk_chance = float(self.cfg.get("high_risk_chance", 5.0))
         self.high_risk_raise_min = float(self.cfg.get("high_risk_raise_min_pct", 1.10))
         self.high_risk_raise_max = float(self.cfg.get("high_risk_raise_max_pct", 1.20))
         self.high_risk_interval = int(self.cfg.get("high_risk_interval", 20))
@@ -97,8 +98,7 @@ class WolfBetBot:
     # ---------- HTTP helpers ----------
     def _get(self, path):
         try:
-            r = requests.get(f"{API_BASE}{path}", headers=self.headers, timeout=20)
-            return r
+            return requests.get(f"{API_BASE}{path}", headers=self.headers, timeout=20)
         except Exception as e:
             if self.debug:
                 console.print(f"[red]⚠️ GET {path} error:[/red] {e}")
@@ -106,41 +106,29 @@ class WolfBetBot:
 
     def _post(self, path, payload):
         try:
-            r = requests.post(f"{API_BASE}{path}", headers=self.headers, json=payload, timeout=20)
-            return r
+            return requests.post(f"{API_BASE}{path}", headers=self.headers, json=payload, timeout=20)
         except Exception as e:
             if self.debug:
                 console.print(f"[yellow]⚠️ POST {path} error:[/yellow] {e}")
             return None
 
-    def get_balances(self):
+    def get_balance_currency(self, currency):
         r = self._get("/user/balances")
         if not r:
             return None
         try:
-            return r.json().get("balances", [])
+            for b in r.json().get("balances", []):
+                if str(b.get("currency", "")).lower() == currency.lower():
+                    return float(b.get("amount", 0))
         except Exception:
             return None
-
-    def get_balance_currency(self, currency):
-        balances = self.get_balances()
-        if not balances:
-            return None
-        for b in balances:
-            if str(b.get("currency", "")).lower() == currency.lower():
-                try:
-                    return float(b.get("amount", 0))
-                except Exception:
-                    return None
         return None
 
     def place_dice_bet(self, amount, rule, bet_value):
         amount = round(float(amount), 8)
         win_chance = bet_value if rule == "under" else (100.0 - bet_value)
         win_chance = max(win_chance, 0.01)
-        multiplier = 99.0 / win_chance
-        multiplier = float(f"{multiplier:.4f}")
-
+        multiplier = float(f"{99.0 / win_chance:.4f}")
         payload = {
             "currency": self.currency,
             "game": "dice",
@@ -166,25 +154,27 @@ class WolfBetBot:
         ch = chance_override if chance_override is not None else self.chance
         ch = self._cap(ch, 0.01, 99.99)
         if self.rule_mode == "over":
-            rule = "over"
-            bet_value = self._cap(100.0 - ch, 0.01, 99.99)
+            rule, bet_value = "over", self._cap(100.0 - ch, 0.01, 99.99)
         elif self.rule_mode == "under":
-            rule = "under"
-            bet_value = self._cap(ch, 0.01, 99.99)
+            rule, bet_value = "under", self._cap(ch, 0.01, 99.99)
         else:
-            if random.randint(0, 1) == 1:
-                rule = "under"
-                bet_value = self._cap(ch, 0.01, 99.99)
+            if random.randint(0, 1):
+                rule, bet_value = "under", self._cap(ch, 0.01, 99.99)
             else:
-                rule = "over"
-                bet_value = self._cap(100.0 - ch, 0.01, 99.99)
+                rule, bet_value = "over", self._cap(100.0 - ch, 0.01, 99.99)
         return rule, bet_value
+
+    def get_starting_bet_for_new_strategy(self):
+        if self.strategy_start_mode == "last_bet" and self.last_bet_amount > 0:
+            return self.last_bet_amount
+        elif self.strategy_start_mode == "last_loss" and self.last_loss_amount > 0:
+            return self.last_loss_amount
+        else:
+            return self.base_bet
 
     # ---------- strategy implementations ----------
     def strat_martingale_next(self, won):
-        if won:
-            return self.base_bet
-        return round(max(self.current_bet * self.multiplier, self.base_bet), 8)
+        return self.base_bet if won else round(max(self.current_bet * self.multiplier, self.base_bet), 8)
 
     def strat_fibonacci_next(self, won):
         if won:
@@ -203,23 +193,20 @@ class WolfBetBot:
         if won:
             return self.base_bet
         ref = self.last_bet_amount if self.last_bet_amount > 0 else self.base_bet
-        factor = random.uniform(self.jackpot_raise_min, self.jackpot_raise_max)
-        return round(ref * factor, 8)
+        return round(ref * random.uniform(self.jackpot_raise_min, self.jackpot_raise_max), 8)
 
     def strat_high_risk_pulse_next(self, won):
         if won:
             return self.base_bet
         ref = self.last_bet_amount if self.last_bet_amount > 0 else self.base_bet
-        factor = random.uniform(self.high_risk_raise_min, self.high_risk_raise_max)
-        return round(ref * factor, 8)
+        return round(ref * random.uniform(self.high_risk_raise_min, self.high_risk_raise_max), 8)
 
     def strat_randomized_next(self, won):
         if won:
             return self.base_bet
         if self.randomized_mode == "multiplier":
             ref = self.last_bet_amount if self.last_bet_amount > 0 else self.base_bet
-            factor = random.uniform(self.randomized_min_mult, self.randomized_max_mult)
-            return round(ref * factor, 8)
+            return round(ref * random.uniform(self.randomized_min_mult, self.randomized_max_mult), 8)
         else:
             upper = max(self.last_loss_amount, self.base_bet)
             return round(random.uniform(self.base_bet, upper), 8)
@@ -277,8 +264,7 @@ class WolfBetBot:
             logo = "W O L F  D I C E  B O T"
             for i, c in enumerate(logo):
                 print(f"{gradient[i % len(gradient)]}{c}\033[0m", end="")
-            print("\n")
-            print("🎲🐺  🎲🐺  🎲🐺  🎲🐺  🎲🐺\n")
+            print("\n🎲🐺  🎲🐺  🎲🐺  🎲🐺  🎲🐺\n")
         except Exception:
             console.print("[bold cyan]WOLF DICE BOT[/bold cyan]\n")
 
@@ -289,9 +275,9 @@ class WolfBetBot:
         old = self.current_strategy
         self.strategy_index = (self.strategy_index + 1) % len(self.strategy_cycle)
         self.current_strategy = self.strategy_cycle[self.strategy_index]
-        # gunakan last bet amount sebagai starting bet strategy baru
-        self.current_bet = self.last_bet_amount if self.last_bet_amount > 0 else self.base_bet
-        console.print(f"[cyan]🔁 Strategy switched ({reason}): {old} -> {self.current_strategy}[/cyan]")
+        self.current_bet = self.get_starting_bet_for_new_strategy()
+        console.print(f"[cyan]🔁 Strategy switched ({reason}): {old} -> {self.current_strategy}[/cyan] "
+                      f"(start bet {self.current_bet:.8f})")
 
     # ---------- main loop ----------
     def run(self):
@@ -315,7 +301,8 @@ class WolfBetBot:
         self.start_time = time.time()
         self.bet_history = []
 
-        console.print(f"[green]💰 Baki awal:[/green] {start_balance:.8f} {self.currency.upper()}  |  [blue]Start strategy:[/blue] {self.current_strategy}\n")
+        console.print(f"[green]💰 Baki awal:[/green] {start_balance:.8f} {self.currency.upper()}  "
+                      f"|  [blue]Start strategy:[/blue] {self.current_strategy}\n")
 
         with Live(refresh_per_second=4, screen=True) as live:
             while True:
@@ -355,13 +342,11 @@ class WolfBetBot:
                     self.fibo_seq = [self.base_bet, self.base_bet]
                     self.fibo_index = 0
                 else:
-                    loss_amount = amount
-                    self.session_profit -= loss_amount
+                    self.session_profit -= amount
                     self.lose_count += 1
                     self.loss_streak_count += 1
-                    self.last_loss_amount = loss_amount
-                    display_profit = f"[red]{-loss_amount:.8f}[/red]"
-
+                    self.last_loss_amount = amount
+                    display_profit = f"[red]{-amount:.8f}[/red]"
                     if self.current_strategy == "martingale":
                         self.current_bet = self.strat_martingale_next(False)
                     elif self.current_strategy == "fibonacci":
@@ -371,7 +356,7 @@ class WolfBetBot:
                     elif self.current_strategy == "jackpot_hunter":
                         self.current_bet = self.strat_jackpot_hunter_next(False)
                     elif self.current_strategy == "high_risk_pulse":
-                        if self.total_bets > 0 and (self.total_bets % self.high_risk_interval) == 0:
+                        if self.total_bets % self.high_risk_interval == 0:
                             ref = self.last_loss_amount if self.last_loss_amount > 0 else self.base_bet
                             self.current_bet = round(ref * 2.0, 8)
                         else:
@@ -398,11 +383,13 @@ class WolfBetBot:
                         self.switch_to_next_strategy(reason="on_loss_streak")
                         self.loss_streak_count = 0
 
-                self._update_ui(start_balance, start_balance + self.session_profit, self.total_bets, self.win_count, self.lose_count, live)
+                self._update_ui(start_balance, start_balance + self.session_profit, self.total_bets,
+                                self.win_count, self.lose_count, live)
                 time.sleep(self.cooldown)
 
         final_runtime = time.strftime("%H:%M:%S", time.gmtime(int(time.time() - self.start_time)))
-        console.print(self._summary_panel(start_balance, start_balance + self.session_profit, self.total_bets, self.win_count, self.lose_count, final_runtime))
+        console.print(self._summary_panel(start_balance, start_balance + self.session_profit,
+                                          self.total_bets, self.win_count, self.lose_count, final_runtime))
 
 
 if __name__ == "__main__":
