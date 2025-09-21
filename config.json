@@ -1,44 +1,33 @@
 {
-  "access_token": "ISI_TOKEN_WOLFBET_DI_SINI",
-
-  "currency": "etc",
-  "base_bet": 0.00000004,
-  "multiplier": 1.35,
+  "access_token": "MASUKKAN_TOKEN_API_WOLFBET",
+  "currency": "matic",
+  "base_bet": 0.00000015,
+  "multiplier": 2.0,
   "max_bet": 0.01,
-  "chance": 28,
-  "rule_mode": "auto",
-
+  "chance": 49.5,
+  "rule_mode": "auto",        // pilihan: auto / over / under
   "take_profit": 0.0005,
   "stop_loss": -0.5,
-  "cooldown_sec": 0,
+  "cooldown_sec": 1.0,
   "debug": true,
   "auto_start": true,
   "auto_start_delay": 5,
 
   "strategy": "martingale",
   "auto_strategy_change": true,
-  "strategy_switch_mode": "on_loss_streak",
-  "loss_streak_trigger": 5,
+  "strategy_cycle": ["martingale", "fibonacci", "flat", "randomized"],
+  "strategy_switch_mode": "on_loss_streak",  // pilihan: on_win / on_loss_streak
+  "loss_streak_trigger": 3,
+  "strategy_start_mode": "last_bet",        // pilihan: last_bet / last_loss / base
 
-  "strategy_cycle": [
-    "martingale",
-    "fibonacci",
-    "flat",
-    "jackpot_hunter",
-    "high_risk_pulse",
-    "randomized"
-  ],
-
-  "jackpot_chance": 1.0,
   "jackpot_raise_min_pct": 1.02,
   "jackpot_raise_max_pct": 1.05,
 
-  "high_risk_chance": 5.0,
-  "high_risk_raise_min_pct": 1.05,
-  "high_risk_raise_max_pct": 1.10,
+  "high_risk_raise_min_pct": 1.10,
+  "high_risk_raise_max_pct": 1.20,
   "high_risk_interval": 20,
 
-  "randomized_mode": "multiplier",
-  "randomized_min_mult": 1.02,
-  "randomized_max_mult": 1.35
+  "randomized_mode": "multiplier",     // pilihan: multiplier / range
+  "randomized_min_mult": 1.12,
+  "randomized_max_mult": 1.5
 }
