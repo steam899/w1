@@ -1,18 +1,15 @@
 {
   "access_token": "ISI_TOKEN_WOLFBET_DI_SINI",
 
-  "currency": "trx",
-
+  "currency": "doge",
   "base_bet": 0.00000004,
-  "multiplier": 2.0,
-  "max_bet": 0.01,
-  "chance": 49.5,
+  "multiplier": 1.33,
+  "chance": 25,
   "rule_mode": "auto",
 
   "take_profit": 0.0005,
   "stop_loss": -0.5,
-  "cooldown_sec": 1.0,
-
+  "cooldown_sec": 0,
   "debug": true,
   "auto_start": true,
   "auto_start_delay": 5,
@@ -36,7 +33,11 @@
   "jackpot_raise_max_pct": 1.05,
 
   "high_risk_chance": 5.0,
-  "high_risk_raise_min_pct": 1.05,
-  "high_risk_raise_max_pct": 1.10,
-  "high_risk_interval": 20
+  "high_risk_raise_min_pct": 1.10,
+  "high_risk_raise_max_pct": 1.20,
+  "high_risk_interval": 20,
+
+  "randomized_mode": "multiplier",
+  "randomized_min_mult": 1.02,
+  "randomized_max_mult": 1.35
 }
