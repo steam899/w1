@@ -17,8 +17,8 @@
 
   "strategy": "martingale",
   "auto_strategy_change": true,
-  "strategy_switch_mode": "on_win",        
-  "loss_streak_trigger": 5,                
+  "strategy_switch_mode": "on_loss_streak",
+  "loss_streak_trigger": 5,
 
   "strategy_cycle": [
     "martingale",
@@ -30,6 +30,12 @@
     "randomized"
   ],
 
-  "jackpot_chance": 1.0,                  
-  "high_risk_interval": 20                
+  "jackpot_chance": 1.0,
+  "jackpot_raise_min_pct": 1.02,
+  "jackpot_raise_max_pct": 1.05,
+
+  "high_risk_chance": 5.0,
+  "high_risk_raise_min_pct": 1.10,
+  "high_risk_raise_max_pct": 1.20,
+  "high_risk_interval": 20
 }
