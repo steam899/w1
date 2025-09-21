@@ -24,7 +24,6 @@
   "strategy_cycle": [
     "martingale",
     "fibonacci",
-    "dalembert",
     "flat",
     "jackpot_hunter",
     "high_risk_pulse",
