@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-WolfBet Multi-Strategy Dice Bot (complete)
-- Strategies: martingale, fibonacci, dalembert, flat,
+WolfBet Multi-Strategy Dice Bot — COMPLETE
+- Strategies: martingale, fibonacci, dalembert (smooth), flat,
   jackpot_hunter (2-5% raise on loss), high_risk_pulse (10-20% raise on loss),
   randomized (uses last_loss_amount upper bound)
 - Auto-switch modes: on_win, on_loss_streak
 - Cover-loss: next bet will attempt to cover cumulative loss + base_bet
-- Minimal external deps: requests, rich
+- NOTE: This version intentionally DOES NOT enforce a `max_bet` cap.
+  That means bet sizes can grow arbitrarily large. Use with extreme caution.
+
+Dependencies: requests, rich
 """
+
 import json
 import time
 import random
@@ -43,7 +47,7 @@ class WolfBetBot:
         self.currency = str(self.cfg.get("currency", "btc")).lower()
         self.base_bet = float(self.cfg.get("base_bet", 0.00000001))
         self.multiplier = float(self.cfg.get("multiplier", 2.0))
-        self.max_bet = float(self.cfg.get("max_bet", 0.0001))
+        # NOTE: no max_bet in this version (user requested)
         self.chance = float(self.cfg.get("chance", 49.5))
         self.rule_mode = str(self.cfg.get("rule_mode", "auto")).lower()
         self.take_profit = float(self.cfg.get("take_profit", 0.0005))
@@ -133,7 +137,7 @@ class WolfBetBot:
     def place_dice_bet(self, amount, rule, bet_value):
         amount = round(float(amount), 8)
         win_chance = bet_value if rule == "under" else (100.0 - bet_value)
-        win_chance = max(win_chance, 0.01)  # guard
+        win_chance = max(win_chance, 0.01)
         multiplier = 99.0 / win_chance
         multiplier = float(f"{multiplier:.4f}")
 
@@ -164,7 +168,6 @@ class WolfBetBot:
         return max(lo, min(hi, val))
 
     def chance_to_rule_and_threshold(self, chance_override=None):
-        # prefer explicit override
         ch = chance_override if chance_override is not None else self.chance
         ch = self._cap(ch, 0.01, 99.99)
         if self.rule_mode == "over":
@@ -182,11 +185,11 @@ class WolfBetBot:
                 bet_value = self._cap(100.0 - ch, 0.01, 99.99)
         return rule, bet_value
 
-    # ---------- strategy implementations ----------
+    # ---------- strategies ----------
     def strat_martingale(self, win, last_bet):
         if win:
             return self.base_bet
-        return min(round(last_bet * self.multiplier, 8), self.max_bet)
+        return round(last_bet * self.multiplier, 8)
 
     def strat_fibonacci(self, win):
         if win:
@@ -196,49 +199,45 @@ class WolfBetBot:
             self.fibo_seq.append(self.base_bet)
         else:
             self.fibo_seq.append(self.fibo_seq[-1] + self.fibo_seq[-2])
-        return min(round(self.fibo_seq[-1], 8), self.max_bet)
+        return round(self.fibo_seq[-1], 8)
 
     def strat_dalembert(self, win, last_bet):
+        # smooth D'Alembert: step = 25% of base_bet
+        step = self.base_bet * 0.25
         if win:
-            return max(self.base_bet, round(last_bet - self.base_bet, 8))
-        return min(round(last_bet + self.base_bet, 8), self.max_bet)
+            return max(self.base_bet, round(last_bet - step, 8))
+        return round(last_bet + step, 8)
 
     def strat_flat(self, win, last_bet):
         return self.base_bet
 
     def strat_jackpot_hunter(self):
-        # conservative jackpot hunter:
-        # - use configured small chance override
-        # - when losing, raise bet by small random pct (2-5%)
-        # - when winning or fresh, use base_bet
+        # conservative jackpot hunter: small chance override, small raises on loss
         self.override_chance = self.jackpot_chance
         if self.last_outcome == "lose":
             factor = random.uniform(self.jackpot_raise_min, self.jackpot_raise_max)
-            bet = min(round(self.current_bet * factor, 8), self.max_bet)
+            bet = round(self.current_bet * factor, 8)
         else:
             bet = self.base_bet
         return bet
 
     def strat_high_risk_pulse(self):
-        # moderated high-risk pulse:
-        # - use configured chance override
-        # - increases by small pct on loss (10-20%), reset to base on win
+        # moderate high-risk pulse: chance override and small raises on loss
         self.override_chance = self.high_risk_chance
         if self.last_outcome == "lose":
             factor = random.uniform(self.high_risk_raise_min, self.high_risk_raise_max)
-            bet = min(round(self.current_bet * factor, 8), self.max_bet)
+            bet = round(self.current_bet * factor, 8)
         else:
-            # every interval we may use slightly larger pulse but still conservative
+            # occasional pulse based on interval
             if self.total_bets > 0 and (self.total_bets % self.high_risk_interval) == 0:
-                bet = min(round(self.base_bet * 5, 8), self.max_bet)  # pulse x5 (capped)
+                bet = round(self.base_bet * 5, 8)
             else:
                 bet = self.base_bet
         return bet
 
     def strat_randomized(self):
-        # use last_loss_amount as upper bound (not max_bet)
+        # use last_loss_amount as upper bound (not capped)
         upper = max(self.last_loss_amount, self.base_bet)
-        upper = min(upper, self.max_bet)
         amount = round(random.uniform(self.base_bet, upper), 8)
         return amount
 
@@ -328,15 +327,10 @@ class WolfBetBot:
                     console.print(f"\n[green]✅ Take-profit triggered:[/green] {self.session_profit:.8f} {self.currency.upper()}")
                     break
 
-                # cap current bet if exceeding max
-                if self.current_bet > self.max_bet:
-                    console.print(f"\n[cyan]⚠️ current_bet above max_bet - capping to max_bet.[/cyan]")
-                    self.current_bet = self.max_bet
-
-                # prepare chance override (some stripes set override inside strat function)
+                # prepare chance override
                 self.override_chance = None
 
-                # determine rule & threshold using any override (will be None here; strat functions set override before next loop)
+                # determine rule & threshold using any override
                 rule, bet_value = self.chance_to_rule_and_threshold(self.override_chance)
 
                 # place bet
@@ -354,11 +348,10 @@ class WolfBetBot:
                 result_value = str(bet.get("result_value"))
                 self.total_bets += 1
 
-                # record outcome (so strat functions can see last_outcome for next round)
+                # record outcome
                 self.last_outcome = state
 
                 if state == "win":
-                    # process win
                     self.session_profit += profit
                     self.win_count += 1
                     outcome = "[bold green]WIN[/bold green]"
@@ -369,7 +362,7 @@ class WolfBetBot:
                     self.loss_streak_count = 0
                     self.last_loss_amount = self.base_bet
 
-                    # determine next bet by strategy win-behaviour
+                    # determine next bet according to strategy win behaviour
                     if self.current_strategy == "martingale":
                         self.current_bet = self.strat_martingale(True, self.current_bet)
                     elif self.current_strategy == "fibonacci":
@@ -387,15 +380,16 @@ class WolfBetBot:
                     else:
                         self.current_bet = self.base_bet
 
-                    # auto-switch on win
-                    if self.auto_strategy_change and self.strategy_switch_mode == "on_win" and len(self.strategy_cycle) > 0:
-                        old = self.current_strategy
-                        self.strategy_index = (self.strategy_index + 1) % len(self.strategy_cycle)
-                        self.current_strategy = self.strategy_cycle[self.strategy_index]
-                        console.print(f"[yellow]🔁 Strategy switched (on win): {old} -> {self.current_strategy}[/yellow]")
+                    # auto-switch strategy if configured and mode = on_win
+                    if self.auto_strategy_change and self.strategy_switch_mode == "on_win":
+                        if len(self.strategy_cycle) > 0:
+                            self.strategy_index = (self.strategy_index + 1) % len(self.strategy_cycle)
+                            old = self.current_strategy
+                            self.current_strategy = self.strategy_cycle[self.strategy_index]
+                            console.print(f"[yellow]🔁 Strategy switched (on win): {old} -> {self.current_strategy}[/yellow]")
 
                 else:
-                    # process lose
+                    # LOSS
                     loss_amount = float(bet.get("amount", self.current_bet))
                     self.session_profit -= loss_amount
                     self.lose_count += 1
@@ -405,7 +399,7 @@ class WolfBetBot:
                     self.last_loss_amount = loss_amount
                     display_profit = f"[red]{-self.loss_streak_total:.8f}[/red]"
 
-                    # determine next bet by strategy loss-behaviour
+                    # determine next bet according to strategy loss behaviour
                     if self.current_strategy == "martingale":
                         next_bet = self.strat_martingale(False, self.current_bet)
                     elif self.current_strategy == "fibonacci":
@@ -423,28 +417,24 @@ class WolfBetBot:
                     else:
                         next_bet = self.base_bet
 
-                    # cover-loss: ensure next bet attempts to cover cumulative loss + base profit
+                    # COVER LOSS: ensure next bet tries to cover cumulative loss + base_bet
                     cover_needed = abs(self.loss_streak_total) + self.base_bet
                     if next_bet < cover_needed:
                         next_bet = cover_needed
 
-                    # cap if beyond max_bet
-                    if next_bet > self.max_bet:
-                        console.print(f"[magenta]⚠️ Required cover {next_bet:.8f} exceeds max_bet {self.max_bet:.8f}. Capping to max_bet[/magenta]")
-                        next_bet = self.max_bet
-
+                    # NOTE: no max_bet cap here (user requested). We still round.
                     self.current_bet = round(next_bet, 8)
 
-                    # auto-switch on loss_streak mode
-                    if self.auto_strategy_change and self.strategy_switch_mode == "on_loss_streak" and len(self.strategy_cycle) > 0:
-                        if self.loss_streak_count >= self.loss_streak_trigger:
+                    # auto-switch on loss_streak if configured
+                    if self.auto_strategy_change and self.strategy_switch_mode == "on_loss_streak":
+                        if self.loss_streak_count >= self.loss_streak_trigger and len(self.strategy_cycle) > 0:
                             old = self.current_strategy
                             self.strategy_index = (self.strategy_index + 1) % len(self.strategy_cycle)
                             self.current_strategy = self.strategy_cycle[self.strategy_index]
                             console.print(f"[red]🔁 Strategy switched (on loss streak): {old} -> {self.current_strategy}[/red]")
-                            self.loss_streak_count = 0  # reset counter to avoid repeat switching
+                            self.loss_streak_count = 0
 
-                # history & UI update
+                # history & UI
                 arrow = "↑" if rule == "over" else "↓"
                 self.bet_history.append([
                     f"{bet_value:.2f}[cyan]{arrow}[/cyan]",
@@ -457,7 +447,7 @@ class WolfBetBot:
                 current_balance = start_balance + self.session_profit
                 self._update_ui(start_balance, current_balance, self.total_bets, self.win_count, self.lose_count, live)
 
-                # clear override unless next strategy sets it
+                # clear override
                 self.override_chance = None
 
                 time.sleep(self.cooldown)
