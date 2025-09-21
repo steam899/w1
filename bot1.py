@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-WolfBet Multi-Strategy Dice Bot — COMPLETE
-- Strategies: martingale, fibonacci, dalembert (smooth), flat,
+WolfBet Multi-Strategy Dice Bot (complete, D'Alembert removed)
+- Strategies: martingale, fibonacci, flat,
   jackpot_hunter (2-5% raise on loss), high_risk_pulse (10-20% raise on loss),
   randomized (uses last_loss_amount upper bound)
 - Auto-switch modes: on_win, on_loss_streak
 - Cover-loss: next bet will attempt to cover cumulative loss + base_bet
-- NOTE: This version intentionally DOES NOT enforce a `max_bet` cap.
-  That means bet sizes can grow arbitrarily large. Use with extreme caution.
-
 Dependencies: requests, rich
 """
-
 import json
 import time
 import random
@@ -47,7 +43,7 @@ class WolfBetBot:
         self.currency = str(self.cfg.get("currency", "btc")).lower()
         self.base_bet = float(self.cfg.get("base_bet", 0.00000001))
         self.multiplier = float(self.cfg.get("multiplier", 2.0))
-        # NOTE: no max_bet in this version (user requested)
+        self.max_bet = float(self.cfg.get("max_bet", 0.0001))
         self.chance = float(self.cfg.get("chance", 49.5))
         self.rule_mode = str(self.cfg.get("rule_mode", "auto")).lower()
         self.take_profit = float(self.cfg.get("take_profit", 0.0005))
@@ -185,7 +181,7 @@ class WolfBetBot:
                 bet_value = self._cap(100.0 - ch, 0.01, 99.99)
         return rule, bet_value
 
-    # ---------- strategies ----------
+    # ---------- strategy implementations (D'Alembert removed) ----------
     def strat_martingale(self, win, last_bet):
         if win:
             return self.base_bet
@@ -200,13 +196,6 @@ class WolfBetBot:
         else:
             self.fibo_seq.append(self.fibo_seq[-1] + self.fibo_seq[-2])
         return round(self.fibo_seq[-1], 8)
-
-    def strat_dalembert(self, win, last_bet):
-        # smooth D'Alembert: step = 25% of base_bet
-        step = self.base_bet * 0.25
-        if win:
-            return max(self.base_bet, round(last_bet - step, 8))
-        return round(last_bet + step, 8)
 
     def strat_flat(self, win, last_bet):
         return self.base_bet
@@ -236,7 +225,7 @@ class WolfBetBot:
         return bet
 
     def strat_randomized(self):
-        # use last_loss_amount as upper bound (not capped)
+        # use last_loss_amount as upper bound
         upper = max(self.last_loss_amount, self.base_bet)
         amount = round(random.uniform(self.base_bet, upper), 8)
         return amount
@@ -367,8 +356,6 @@ class WolfBetBot:
                         self.current_bet = self.strat_martingale(True, self.current_bet)
                     elif self.current_strategy == "fibonacci":
                         self.current_bet = self.strat_fibonacci(True)
-                    elif self.current_strategy == "dalembert":
-                        self.current_bet = self.strat_dalembert(True, self.current_bet)
                     elif self.current_strategy == "flat":
                         self.current_bet = self.strat_flat(True, self.current_bet)
                     elif self.current_strategy == "jackpot_hunter":
@@ -404,8 +391,6 @@ class WolfBetBot:
                         next_bet = self.strat_martingale(False, self.current_bet)
                     elif self.current_strategy == "fibonacci":
                         next_bet = self.strat_fibonacci(False)
-                    elif self.current_strategy == "dalembert":
-                        next_bet = self.strat_dalembert(False, self.current_bet)
                     elif self.current_strategy == "flat":
                         next_bet = self.strat_flat(False, self.current_bet)
                     elif self.current_strategy == "jackpot_hunter":
@@ -422,7 +407,11 @@ class WolfBetBot:
                     if next_bet < cover_needed:
                         next_bet = cover_needed
 
-                    # NOTE: no max_bet cap here (user requested). We still round.
+                    # Enforce max_bet cap (present in this version)
+                    if next_bet > self.max_bet:
+                        console.print(f"[magenta]⚠️ Required cover {next_bet:.8f} exceeds max_bet {self.max_bet:.8f}. Capping to max_bet[/magenta]")
+                        next_bet = self.max_bet
+
                     self.current_bet = round(next_bet, 8)
 
                     # auto-switch on loss_streak if configured
